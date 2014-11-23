@@ -127,19 +127,44 @@ class Client:
             self._loop.call_soon(self.on_error, exc)
         raise exc
 
+    def _fatal_error_as_async(self, exc):
+        def handler(task):
+            try:
+                task.result()
+            except:
+                pass
+
+        task = asyncio.async(self._fatal_error(exc))
+        task.add_done_callback(handler)
+
     def _on_protocol_disconnect(self, exc):
+        logger.debug("protocol disconnected: %r", exc)
         if not self._disconnected.is_set():
+            logger.debug("forwarding disconnect")
             exc = exc or ConnectionError("Disconnected")
-            asyncio.async(self._fatal_error(exc))
+            self._fatal_error_as_async(exc)
+        else:
+            logger.debug("protocol disconnect ignored (already disconnected)")
 
     def _on_task_done(self, task):
-        exc = task.exception()
-        if exc is not None:
-            if not isinstance(exc, asyncio.CancelledError):
-                logger.error("task %r unexpectedly exited: %s: %s",
-                             task,
-                             type(exc).__name__,
-                             exc)
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception as err:
+            logger.error("task %r unexpectedly exited: %s: %s",
+                         task,
+                         type(err).__name__,
+                         err)
+            self._fatal_error_as_async(err)
+
+    def _packet_to_update_type(self, packet_type):
+        try:
+            return packet_to_update_type[packet_type]
+        except KeyError:
+            raise ValueError(
+                "unsupported push packet type: {}".format(packet_type)
+            ) from None
 
     @asyncio.coroutine
     def _ping_task_impl(self, interval):
@@ -539,6 +564,7 @@ class Client:
         self._protocol.on_disconnect = self._on_protocol_disconnect
         logger.debug("connected")
         self._state = ClientState.CONNECTED
+        self._disconnected.clear()
 
     @asyncio.coroutine
     def connect_tcp(self, host, port=3977, *, encoding="utf8", **kwargs):
@@ -557,6 +583,10 @@ class Client:
         self._disconnected.set()
         yield from self._protocol.close(exc)
         self._reset()
+
+    @property
+    def disconnected_event(self):
+        return self._disconnected
 
     @asyncio.coroutine
     def poll_client_info(self, client_id):

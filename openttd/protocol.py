@@ -216,6 +216,7 @@ class OpenTTDPacketProtocol(asyncio.Protocol):
         self._closed.set()
         self._reset()
         if self.on_disconnect is not None:
+            logger.debug("forwarding disconnect event")
             self._loop.call_soon(self.on_disconnect, exc)
 
     def pause_writing(self):
@@ -392,5 +393,7 @@ class OpenTTDPacketProtocol(asyncio.Protocol):
                     pass
 
     def send_packet(self, pkt):
+        if self._transport is None:
+            raise ConnectionError("Disconnected")
         logger.debug("sending packet: %r", pkt)
         self._transport.write(pkt.finalize_packet())
