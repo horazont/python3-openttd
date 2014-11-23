@@ -293,6 +293,17 @@ class Client:
         else:
             return map(handler_func, values)
 
+    def _prepare_subscription(self, update_type, packet_types, frequency):
+        dependencies, prev_frequency = self._update_dependencies.setdefault(
+            update_type,
+            (set(), frequency))
+        if not dependencies:
+            # subscribe
+            self._set_update_frequency(update_type, frequency)
+        elif prev_frequency != frequency:
+            raise ValueError("New frequency conflicts with set frequency")
+        dependencies.update(packet_types)
+
     def _recv_chat(self, pkt):
         chat_message = info.ChatMessage()
         chat_message.read_from_packet(pkt)
@@ -671,24 +682,9 @@ class Client:
 
         return result_generator(results)
 
-    def _prepare_subscription(self, update_type, packet_types, frequency):
-        dependencies, prev_frequency = self._update_dependencies.setdefault(
-            update_type,
-            (set(), frequency))
-        if not dependencies:
-            # subscribe
-            self._set_update_frequency(update_type, frequency)
-        elif prev_frequency != frequency:
-            raise ValueError("New frequency conflicts with set frequency")
-        dependencies.update(packet_types)
-
-    def _packet_to_update_type(self, packet_type):
-        try:
-            return packet_to_update_type[packet_type]
-        except KeyError:
-            raise ValueError(
-                "unsupported push packet type: {}".format(packet_type)
-            ) from None
+    @property
+    def server_info(self):
+        return self._server_info
 
     def subscribe_queue_to_push(self,
                                 update_type,
@@ -755,7 +751,3 @@ class Client:
             if not cbs:
                 self._protocol.packet_hooks.remove_queue(packet_type, queue)
                 del self._push_callbacks[packet_type]
-
-    @property
-    def server_info(self):
-        return self._server_info
