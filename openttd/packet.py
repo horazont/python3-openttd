@@ -2,12 +2,7 @@ import io
 import logging
 import struct
 
-try:
-    from enum import Enum, IntEnum
-except ImportError as err:
-    logging.getLogger("init").warn("Cannot use Enum: %s", err)
-    Enum = object
-    IntEnum = object
+from enum import Enum, IntEnum
 
 SEND_MTU = 1460
 

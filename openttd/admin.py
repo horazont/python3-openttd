@@ -2,12 +2,7 @@ import asyncio
 import binascii
 import logging
 
-try:
-    from enum import Enum, IntEnum
-except ImportError:
-    Enum = object
-    IntEnum = object
-
+from enum import Enum, IntEnum
 from datetime import timedelta, datetime
 
 from . import limits, packet, info
