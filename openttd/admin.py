@@ -505,18 +505,23 @@ class Client:
         join_pkt.pack_string(client_name, limits.NETWORK_CLIENT_NAME_LENGTH)
         join_pkt.pack_string(client_version, limits.NETWORK_REVISION_LENGTH)
 
-        response = yield from self._protocol.send_andor_wait_for(
-            [
-                join_pkt
-            ],
-            [
-                packet.AdminPacketType.SERVER_PROTOCOL,
-                packet.AdminPacketType.SERVER_FULL,
-                packet.AdminPacketType.SERVER_BANNED,
-                packet.AdminPacketType.SERVER_ERROR,
-            ],
-            buffer_unknown=True,
-            timeout=10)
+        try:
+            response = yield from self._protocol.send_andor_wait_for(
+                [
+                    join_pkt
+                ],
+                [
+                    packet.AdminPacketType.SERVER_PROTOCOL,
+                    packet.AdminPacketType.SERVER_FULL,
+                    packet.AdminPacketType.SERVER_BANNED,
+                    packet.AdminPacketType.SERVER_ERROR,
+                ],
+                buffer_unknown=True,
+                timeout=10)
+        except ConnectionError:
+            raise ConnectionError(
+                "Disconnected (most likely authentication failure)"
+            ) from None
 
         if response.type_ != packet.AdminPacketType.SERVER_PROTOCOL:
             # FIXME: better error message
