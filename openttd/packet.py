@@ -85,53 +85,86 @@ class AdminPacketType(Enum):
     # An invalid marker for admin packets.
     INVALID_ADMIN_PACKET = 255
 
-
-class FieldType(Enum):
-    BOOL = "bool"
-    UINT8 = "uint8"
-    UINT16 = "uint16"
-    UINT32 = "uint32"
-    UINT64 = "uint64"
-    STRING = "string"
-
 class Packer:
     STRUCT_UINT8 = struct.Struct("<B")
     STRUCT_UINT16 = struct.Struct("<H")
     STRUCT_UINT32 = struct.Struct("<L")
     STRUCT_UINT64 = struct.Struct("<Q")
+    STRUCT_INT8 = struct.Struct("<b")
+    STRUCT_INT16 = struct.Struct("<h")
+    STRUCT_INT32 = struct.Struct("<l")
+    STRUCT_INT64 = struct.Struct("<q")
 
-    def __init__(self, dest=None):
+    def __init__(self, dest=None, *, encoding=None):
         self.dest = dest or io.BytesIO()
+        self._encoding = encoding
 
     def _pack_struct(self, struct, *data):
         buf = struct.pack(*data)
+        offs = self.dest.seek(0, io.SEEK_CUR)
         self.dest.write(buf)
+        return offs, len(buf)
 
     def pack_bool(self, value):
-        self.pack_uint8(1 if value else 0)
+        return self.pack_uint8(1 if value else 0)
 
     def pack_uint8(self, value):
-        self._pack_struct(self.STRUCT_UINT8, value)
+        return self._pack_struct(self.STRUCT_UINT8, value)
 
     def pack_uint16(self, value):
-        self._pack_struct(self.STRUCT_UINT16, value)
+        return self._pack_struct(self.STRUCT_UINT16, value)
 
     def pack_uint32(self, value):
-        self._pack_struct(self.STRUCT_UINT32, value)
+        return self._pack_struct(self.STRUCT_UINT32, value)
 
     def pack_uint64(self, value):
-        self._pack_struct(self.STRUCT_UINT64, value)
+        return self._pack_struct(self.STRUCT_UINT64, value)
+
+    def pack_int8(self, value):
+        return self._pack_struct(self.STRUCT_INT8, value)
+
+    def pack_int16(self, value):
+        return self._pack_struct(self.STRUCT_INT16, value)
+
+    def pack_int32(self, value):
+        return self._pack_struct(self.STRUCT_INT32, value)
+
+    def pack_int64(self, value):
+        return self._pack_struct(self.STRUCT_INT64, value)
 
     def pack_bytes(self, value):
+        offs = self.dest.seek(0, io.SEEK_CUR)
         if b"\0" in value:
             raise ValueError("Cannot pack bytes containing a NUL byte")
         self.dest.write(value)
         self.dest.write(b"\0")
+        return offs, len(value)+1
+
+    def pack_string(self, value, maxlen, *, encoding=None):
+        encoding = encoding or self._encoding
+        if encoding is None:
+            raise ValueError("No encoding specified")
+        value_encoded = value.encode(encoding)
+        if len(value_encoded) > maxlen:
+            raise ValueError(
+                "String value too long ({} out of {} bytes)".format(
+                    len(value_encoded),
+                    maxlen))
+        return self.pack_bytes(value_encoded)
+
+    @property
+    def encoding(self):
+        return self._encoding
 
 
 class Unpacker:
-    def __init__(self, src):
+    def __init__(self, src, *, encoding=None):
         self._src = src
+        self._encoding = encoding
+
+    @property
+    def encoding(self):
+        return self._encoding
 
     def _unpack_struct(self, struct):
         buf = self._src.read(struct.size)
@@ -155,6 +188,18 @@ class Unpacker:
     def unpack_uint64(self):
         return self._unpack_struct(Packer.STRUCT_UINT64)
 
+    def unpack_int8(self):
+        return self._unpack_struct(Packer.STRUCT_INT8)
+
+    def unpack_int16(self):
+        return self._unpack_struct(Packer.STRUCT_INT16)
+
+    def unpack_int32(self):
+        return self._unpack_struct(Packer.STRUCT_INT32)
+
+    def unpack_int64(self):
+        return self._unpack_struct(Packer.STRUCT_INT64)
+
     def unpack_bytes(self):
         byte_list = []
         while True:
@@ -168,14 +213,24 @@ class Unpacker:
 
         return b"".join(byte_list)
 
+    def unpack_string(self, encoding=None):
+        encoding = encoding or self._encoding
+        if encoding is None:
+            raise ValueError("No encoding specified")
+        return self.unpack_bytes().decode(encoding)
+
 class ReceivedPacket(Unpacker):
-    def __init__(self, src):
-        super().__init__(src)
+    def __init__(self, src, **kwargs):
+        super().__init__(src, **kwargs)
         self.size = self.unpack_uint16()
         try:
             self.type_ = AdminPacketType(self.unpack_uint8())
         except ValueError:
             self.type_ = AdminPacketType.INVALID_ADMIN_PACKET
+
+    @property
+    def remaining_length(self):
+        return self.size - self._src.seek(0, io.SEEK_CUR)
 
     def __repr__(self):
         return "<ReceivedPacket type={} size={:d}>".format(
@@ -184,9 +239,9 @@ class ReceivedPacket(Unpacker):
 
 
 class PacketToTransmit(Packer):
-    def __init__(self, type_):
+    def __init__(self, type_, **kwargs):
         self._finalized = False
-        super().__init__()
+        super().__init__(**kwargs)
         self.pack_uint16(0)  # placeholder for size
         self.pack_uint8(type_.value)
 
@@ -215,7 +270,7 @@ class PacketToTransmit(Packer):
         return self.dest.getvalue()
 
     def __repr__(self):
-        return "<PacketToTransmit type={:d} current_size={:d}>".format(
+        return "<PacketToTransmit type={} current_size={:d}>".format(
             AdminPacketType(
-                Packer.STRUCT_UINT8.unpack(self.dest.getbuffer[2:3])[0]),
+                Packer.STRUCT_UINT8.unpack(self.dest.getbuffer()[2:3])[0]),
             len(self.dest.getbuffer()))

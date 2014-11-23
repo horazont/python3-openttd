@@ -90,11 +90,14 @@ class PacketHooks:
         Raise :class:`KeyError`, if *key* does not exist or *future* was not
         registered for listening to *key*.
         """
-        _, futures = self._map[key]
+        queues, futures = self._map[key]
         try:
             futures.remove(future)
         except ValueError:
             raise KeyError(key) from None
+        finally:
+            if not queues and not futures:
+                del self._map[key]
 
     def remove_queue(self, key, queue):
         """
@@ -103,11 +106,14 @@ class PacketHooks:
         Raise :class:`KeyError`, if *key* does not exist or *future* was not
         registered for listening to *key*.
         """
-        queues, _ = self._map[key]
+        queues, futures = self._map[key]
         try:
             queues.remove(queue)
         except ValueError:
             raise KeyError(key) from None
+        finally:
+            if not queues and not futures:
+                del self._map[key]
 
     def unicast(self, key, value):
         """
@@ -124,6 +130,9 @@ class PacketHooks:
             self._map[key]
         copied_futures = futures.copy()
         futures.clear()
+
+        if not queues:
+            del self._map[key]
 
         some_failed = False
         for queue in queues:

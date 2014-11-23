@@ -10,10 +10,12 @@ logger = logging.getLogger(__name__)
 class OpenTTDPacketProtocol(asyncio.Protocol):
     STRUCT_PACKETSIZE = packet.Packer.STRUCT_UINT16
 
-    def __init__(self, loop=None):
+    def __init__(self, encoding=None, loop=None):
         super().__init__()
         self._loop = loop or asyncio.get_event_loop()
         self.packet_hooks = packet_hooks.PacketHooks()
+        self.on_disconnect = None
+        self._encoding = encoding
         self._closed = asyncio.Event(loop=loop)
         self._closed.set()
         self._reset()
@@ -24,11 +26,12 @@ class OpenTTDPacketProtocol(asyncio.Protocol):
 
     def _finalize_incomplete_buffer(self):
         self._incomplete_buffer.seek(0)
-        final_packet = packet.ReceivedPacket(self._incomplete_buffer)
+        final_packet = packet.ReceivedPacket(self._incomplete_buffer,
+                                             encoding=self._encoding)
         self._incomplete_buffer = None
         self._incomplete_size = None
 
-        logger.info("rx packet: %r", final_packet)
+        logger.debug("rx packet: %r", final_packet)
         self._packet_received(final_packet)
 
     def _packet_received(self, packet):
@@ -43,6 +46,55 @@ class OpenTTDPacketProtocol(asyncio.Protocol):
 
     def _protocol_violation(self, msg):
         self._connection_error("Protocol violation: {}".format(msg))
+
+    @asyncio.coroutine
+    def _collector_task(self, eot_futures, data_futures,
+                        initial_timeout,
+                        subsequent_timeout,
+                        response_required):
+        timeout = initial_timeout
+        data_future_set = set(data_futures)
+        eot_future_set = set(eot_futures)
+        has_response = False
+
+        try:
+            while True:
+                future_list = list(eot_futures) + list(data_futures)
+                logger.debug("collector_task: timeout=%f", timeout)
+                done, pending = yield from asyncio.wait(
+                    future_list,
+                    timeout=timeout,
+                    return_when=asyncio.FIRST_COMPLETED,
+                    loop=self._loop)
+
+                if done & data_future_set:
+                    timeout = subsequent_timeout
+                    has_response = True
+                    for future in done:
+                        future.result()
+                    data_future_set -= done
+                    eot_future_set -= done
+                    continue
+
+                if done & eot_future_set:
+                    for future in done:
+                        future.result()
+                    eot_future_set -= done
+                    break
+
+                if response_required and not has_response:
+                    raise TimeoutError("Timeout")
+                break
+        finally:
+            for future in (data_future_set | eot_future_set):
+                future.cancel()
+                type_ = eot_futures.get(future, data_futures[future])
+                logger.debug("collector_task: removing future for %r",
+                             type_)
+                try:
+                    self.packet_hooks.remove_future(type_, future)
+                except KeyError:
+                    pass
 
     def _connection_error(self, msg):
         logger.error("protocol error: %s", msg)
@@ -98,6 +150,54 @@ class OpenTTDPacketProtocol(asyncio.Protocol):
         self.packet_hooks.close_all(exc)
         self._close_transport()
 
+    @asyncio.coroutine
+    def _waiter_task(self, futures, timeout, critical_timeout):
+        logger.debug("send_andor_wait_for: waiting for response...")
+
+        if futures:
+            done, pending = yield from asyncio.wait(
+                [f for _, f in futures],
+                timeout=timeout,
+                return_when=asyncio.FIRST_COMPLETED)
+        else:
+            done = set()
+            pending = set()
+            yield from asyncio.sleep(timeout)
+
+        logger.debug("received response")
+        logger.debug("done=%r", done)
+        logger.debug("pending=%r", pending)
+
+        for type_, future in futures:
+            # skip futures which are done
+            if future not in pending:
+                continue
+
+            future.cancel()
+            try:
+                self.packet_hooks.remove_future(type_, future)
+            except KeyError:
+                # defensive guard against a maybe race condition
+                # (I guess that in some cases, asyncio.wait may catch only
+                # one future, but more than one has been fulfilled)
+                pass
+
+        if not done:
+            logger.debug("timed out")
+            if critical_timeout:
+                self._connection_error("Critical timeout")
+                raise ConnectionError("Disconnected")
+            raise TimeoutError("Timeout")
+
+        try:
+            return done.pop().result()
+        finally:
+            for other_done in done:
+                try:
+                    other_done.result()
+                except:
+                    pass
+
     # shared implementation
 
     def connection_made(self, transport):
@@ -115,6 +215,8 @@ class OpenTTDPacketProtocol(asyncio.Protocol):
         self._close_transport()
         self._closed.set()
         self._reset()
+        if self.on_disconnect is not None:
+            self._loop.call_soon(self.on_disconnect, exc)
 
     def pause_writing(self):
         pass
@@ -178,11 +280,39 @@ class OpenTTDPacketProtocol(asyncio.Protocol):
 
     # public interface
 
+    @property
+    def buffer_unknown(self):
+        return self._buffer_unknown
+
+    @buffer_unknown.setter
+    def buffer_unknown(self, new_value):
+        if new_value == self._buffer_unknown:
+            return
+        self._buffer_unknown = new_value
+        if not new_value:
+            self._reinspect_buffered_packets()
+
+    @asyncio.coroutine
+    def close(self, exc=None):
+        if self._transport is None:
+            return
+        logger.debug("disconnecting...")
+        if exc is not None:
+            self._terminate(exc)
+        else:
+            self._close_transport()
+        yield from self._closed.wait()
+
+    def new_packet(self, type_):
+        return packet.PacketToTransmit(type_,
+                                       encoding=self._encoding)
+
     @asyncio.coroutine
     def send_andor_wait_for(
             self,
             packets_to_send,
             types_to_wait_for,
+            queues_to_register={},
             timeout=None,
             buffer_unknown=None,
             critical_timeout=True):
@@ -196,76 +326,71 @@ class OpenTTDPacketProtocol(asyncio.Protocol):
             futures.append((type_, f))
             self.packet_hooks.add_future(type_, f)
 
-        for packet in packets_to_send:
-            logger.debug("send_andor_wait_for: sending %d byte packet",
-                         len(packet))
-            self._transport.write(packet)
+        for type_, queue in queues_to_register.items():
+            logger.debug("send_andor_wait_for: registering queue for type %r",
+                         type_)
+            self.packet_hooks.add_queue(type_, queue)
 
-        self._reinspect_buffered_packets()
+        try:
+            for packet in packets_to_send:
+                self.send_packet(packet)
 
-        @asyncio.coroutine
-        def waiter_task(futures, timeout, critical_timeout):
-            logger.debug("send_andor_wait_for: waiting for response...")
+            self._reinspect_buffered_packets()
 
-            done, pending = yield from asyncio.wait(
-                [f for _, f in futures],
-                timeout=timeout,
-                return_when=asyncio.FIRST_COMPLETED)
 
-            logger.debug("received response")
-            logger.debug("done=%r", done)
-            logger.debug("pending=%r", pending)
-
-            for type_, future in futures:
-                # skip futures which are done
-                if future not in pending:
-                    continue
-
-                future.cancel()
-                try:
-                    self.packet_hooks.remove_future(type_, future)
-                except KeyError:
-                    # defensive guard against a maybe race condition
-                    # (I guess that in some cases, asyncio.wait may catch only
-                    # one future, but more than one has been fulfilled)
-                    pass
-
-            if not done:
-                logger.debug("timed out")
-                if critical_timeout:
-                    self._connection_error("Critical timeout")
-                    raise ConnectionError("Disconnected")
-                raise TimeoutError("Timeout")
-
-            try:
-                return done.pop().result()
-            finally:
-                for other_done in done:
-                    try:
-                        other_done.result()
-                    except:
-                        pass
-
-        return asyncio.async(
-            waiter_task(futures, timeout, critical_timeout),
-            loop=self._loop)
+            return (yield from self._waiter_task(
+                futures,
+                timeout,
+                critical_timeout))
+        finally:
+            for type_, queue in queues_to_register.items():
+                self.packet_hooks.remove_queue(type_, queue)
 
     @asyncio.coroutine
-    def close(self):
-        if self._transport is None:
-            return
-        logger.debug("disconnecting...")
-        self._close_transport()
-        yield from self._closed.wait()
+    def send_and_collect_replies(self,
+                                 packets_to_send,
+                                 type_queues,
+                                 end_of_transmission_marker,
+                                 initial_timeout,
+                                 subsequent_timeout,
+                                 response_required=True):
+        eot_futures = {}
+        for type_ in end_of_transmission_marker:
+            logger.debug("send_and_collect_replies: registering eot marker %r",
+                         type_)
+            f = asyncio.Future(loop=self._loop)
+            eot_futures[f] = type_
+            self.packet_hooks.add_future(type_, f)
 
-    @property
-    def buffer_unknown(self):
-        return self._buffer_unknown
+        data_futures = {}
+        for type_, queue in type_queues.items():
+            logger.debug("send_and_collect_replies: registering response queue "
+                         "for %r", queue)
+            f = asyncio.Future(loop=self._loop)
+            data_futures[f] = type_
+            self.packet_hooks.add_future(type_, f)
+            self.packet_hooks.add_queue(type_, queue)
 
-    @buffer_unknown.setter
-    def buffer_unknown(self, new_value):
-        if new_value == self._buffer_unknown:
-            return
-        self._buffer_unknown = new_value
-        if not new_value:
+        try:
+            for packet in packets_to_send:
+                self.send_packet(packet)
+
             self._reinspect_buffered_packets()
+
+            return (yield from self._collector_task(
+                eot_futures,
+                data_futures,
+                initial_timeout,
+                subsequent_timeout,
+                response_required))
+        finally:
+            for type_, queue in type_queues.items():
+                # queues might have been killed due to disconnect
+                try:
+                    self.packet_hooks.remove_queue(type_, queue)
+                except KeyError:
+                    pass
+
+    def send_packet(self, pkt):
+        logger.debug("sending packet: %r", pkt)
+        self._transport.write(pkt.finalize_packet())
