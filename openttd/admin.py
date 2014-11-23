@@ -106,7 +106,7 @@ class Client:
         }
 
         self.on_error = None
-        self._loop = loop
+        self._loop = loop or asyncio.get_event_loop()
         self._disconnected = asyncio.Event()
         self._default_timeout = timeout
         self._ping_task = None
