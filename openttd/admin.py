@@ -116,6 +116,8 @@ class Client:
 
     @asyncio.coroutine
     def _fatal_error(self, exc):
+        if not self._disconnected.is_set():
+            raise exc
         logger.fatal("%s: %s", type(exc).__name__, exc)
         yield from self.disconnect(exc)
         if self.on_error:
