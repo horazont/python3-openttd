@@ -152,7 +152,8 @@ class OpenTTDPacketProtocol(asyncio.Protocol):
 
     @asyncio.coroutine
     def _waiter_task(self, futures, timeout, critical_timeout):
-        logger.debug("send_andor_wait_for: waiting for response...")
+        logger = logging.getLogger(__name__ + ".send_andor_wait_for")
+        logger.debug("waiting for response...")
 
         if futures:
             done, pending = yield from asyncio.wait(
@@ -317,19 +318,20 @@ class OpenTTDPacketProtocol(asyncio.Protocol):
             timeout=None,
             buffer_unknown=None,
             critical_timeout=True):
+        logger = logging.getLogger(__name__ + ".send_andor_wait_for")
+
         if buffer_unknown is not None:
             self._buffer_unknown = buffer_unknown
 
         futures = []
         for type_ in types_to_wait_for:
-            logger.debug("send_andor_wait_for: registering for type %r", type_)
+            logger.debug("registering for type %r", type_)
             f = asyncio.Future(loop=self._loop)
             futures.append((type_, f))
             self.packet_hooks.add_future(type_, f)
 
         for type_, queue in queues_to_register.items():
-            logger.debug("send_andor_wait_for: registering queue for type %r",
-                         type_)
+            logger.debug("registering queue for type %r", type_)
             self.packet_hooks.add_queue(type_, queue)
 
         try:
