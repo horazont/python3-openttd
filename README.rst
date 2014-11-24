@@ -20,8 +20,6 @@ See the examples directory for examples :).
 Documentation
 -------------
 
-.. highlight:: bash
-
 Run::
 
     make docs-html

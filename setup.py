@@ -7,6 +7,7 @@ with open("README.rst", "r") as f:
 setup(name="python3-openttd",
       version="0.1",
       description="OpenTTD administration client library",
+      long_description=long_description,
       author="Jonas Wielicki",
       author_email="jonas@wielicki.name",
       url="https://github.com/horazont/python3-openttd",
