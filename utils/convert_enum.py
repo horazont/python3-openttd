@@ -69,7 +69,7 @@ if __name__ == "__main__":
             value = prev_value + 1
 
         if comment is not None:
-            print("{indent}# {}".format(comment, indent=indent))
+            print("{indent}#: {}".format(comment, indent=indent))
         print("{indent}{} = {}".format(name, value, indent=indent))
 
         prev_value = value

@@ -13,10 +13,10 @@ Welcome to python3-openttd's documentation!
 Contents:
 
 .. toctree::
+   :maxdepth: 3
+
    usage/index
    api/index
-
-   :maxdepth: 2
 
 
 

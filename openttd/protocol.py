@@ -1,3 +1,31 @@
+"""
+``openttd.protocol`` -- Generic client :class:`asyncio.Protocol` for OpenTTD
+############################################################################
+
+This module holds the implementation of the packet protocol used by OpenTTD. The
+protcol is a fairly simple packet-based binary protocol. For a more detailed
+description of the protocol and how to work with it from within python, see
+:mod:`openttd.packet`.
+
+Example usage with asyncio:
+
+.. code-block:: python3
+
+   import asyncio
+   import openttd.protocol
+   loop = asyncio.get_event_loop()
+   transport, protocol = yield from loop.create_connection(
+       lamdba: openttd.protocol.PacketProtocol(encoding="utf8", loop=loop),
+       "localhost")
+
+
+
+.. autoclass:: PacketProtocol
+   :members: new_packet, close, buffer_unknown, send_andor_wait_for,
+             send_and_collect_replies, send_packet
+
+"""
+
 import asyncio
 import io
 import logging
@@ -7,7 +35,20 @@ from . import packet, packet_hooks
 
 logger = logging.getLogger(__name__)
 
-class OpenTTDPacketProtocol(asyncio.Protocol):
+class PacketProtocol(asyncio.Protocol):
+    """
+    Create a new :class:`asyncio.Protocol` for working with streams of OpenTTD
+    packets.
+
+    *encoding* is used as argument for all received packets (see
+    :class:`~openttd.packet.ReceivedPacket`), and may be :data:`None`. *loop*
+    must either be a valid :class:`asyncio.BaseEventLoop` or :data:`None`, in
+    which case :func:`asyncio.get_event_loop` is used to obtain an event loop.
+
+    In the future, this class might support datagram style transports (this is
+    not the case yet).
+    """
+
     STRUCT_PACKETSIZE = packet.Packer.STRUCT_UINT16
 
     def __init__(self, encoding=None, loop=None):
@@ -284,6 +325,15 @@ class OpenTTDPacketProtocol(asyncio.Protocol):
 
     @property
     def buffer_unknown(self):
+        """
+        Enable or disable buffering of unhandled packets into a list.
+
+        If this is :data:`True`, any unhandled packets will be collected into a
+        list (called ``unknown_buffer``). Otherwise, these packets are dropped.
+
+        When setting this from :data:`True` to :data:`False`, any buffered
+        packets are re-inspected and dropped if still unknown.
+        """
         return self._buffer_unknown
 
     @buffer_unknown.setter
@@ -296,6 +346,17 @@ class OpenTTDPacketProtocol(asyncio.Protocol):
 
     @asyncio.coroutine
     def close(self, exc=None):
+        """
+        Close the protocol, also closing the underlying transport.
+
+        If the protocol is already closed, return immediately. Otherwise,
+        initiiate the closing and wait until the protocol is closed.
+
+        If *exc* is not :data:`None`, the it must be a :class:`Exception` which
+        will be forwarded to any coroutines waiting on input from the
+        protocol. If *exc* is :data:`None`, a new :class:`ConnectionError` with
+        an appropriate error message will be created for that purpose.
+        """
         if self._transport is None:
             return
         logger.debug("disconnecting...")
@@ -305,9 +366,22 @@ class OpenTTDPacketProtocol(asyncio.Protocol):
             self._close_transport()
         yield from self._closed.wait()
 
+    @property
+    def encoding(self):
+        """
+        The encoding used for text data packed into packets. This is set at
+        construction time.
+        """
+        return self._encoding
+
     def new_packet(self, type_):
-        return packet.PacketToTransmit(type_,
-                                       encoding=self._encoding)
+        """
+        Create a new :class:`~openttd.packet.PacketToTransmit` with the given
+        *type_* and the :attr:`encoding` of this protocol and return it.
+        """
+        return packet.PacketToTransmit(
+            type_,
+            encoding=self._encoding)
 
     @asyncio.coroutine
     def send_andor_wait_for(
@@ -318,6 +392,36 @@ class OpenTTDPacketProtocol(asyncio.Protocol):
             timeout=None,
             buffer_unknown=None,
             critical_timeout=True):
+        """
+        Send zero or more packets and wait for a response.
+
+        *packets_to_send* must be an iterable of
+        :class:`~openttd.packet.PacketToTransmit` instances. Each will be
+        finalized and sent.
+
+        *types_to_wait_for* must be a list of packet types. After sending the
+        packets, the coroutine will wait for a packet with any of the given
+        types to arrive and return the first matching packet.
+
+        *queues_to_register* is an optional dictionary mapping packet types to
+        :class:`asyncio.Queue` objects. Each queue is registered to receive
+        packets of the type mapping to it and unregistered when the coroutine
+        returns.
+
+        If *timeout* is not :data:`None`, the coroutine will wait for at most
+        *timeout* seconds for a response. If no response is received in that
+        interval, a timeout occurs.
+
+        If a timeout occurs and *critical_timeout* is :data:`True`, a fatal
+        error is triggered closing the stream with a :class:`TimeoutError`
+        exception. Otherwise, only the coroutine is aborted with a
+        :class:`TimeoutError`.
+
+        If *buffer_unknown* is not :data:`None`, the :attr:`buffer_unknown`
+        property is set to the value given in *buffer_unknown* before anything
+        else happens. In any case, any buffered packet will be reinspected
+        during the execution of this coroutine.
+        """
         logger = logging.getLogger(__name__ + ".send_andor_wait_for")
 
         if buffer_unknown is not None:
@@ -357,6 +461,48 @@ class OpenTTDPacketProtocol(asyncio.Protocol):
                                  initial_timeout,
                                  subsequent_timeout,
                                  response_required=True):
+        """
+        Send zero or more packets and collect multiple responses.
+
+        *packets_to_send* must be an iterable of
+        :class:`~openttd.packet.PacketToTransmit` instances. Each will be
+        finalized and sent.
+
+        *type_queues* must be a dictionary mapping packet types to
+        :class:`asyncio.Queue` objects. Each queue will be registered to listen
+        for the packet type mapping to it.
+
+        *end_of_transmission_marker* must be an iterable of packet types. Each
+        of these types will be recognized as an end of transmission marker. This
+        list may be empty.
+
+        *initial_timeout* is the timeout in seconds until which the first
+        response must arrive. *subsequent_timeout* is the timeout in seconds for
+        any subsequent respones to arrive.
+
+        After sending, the coroutine listens for any of the packet types
+        specified in *type_queues* and *end_of_transmission_marker*, for at most
+        *initial_timeout* seconds. When the first packet is received, the
+        timeout is set to *subsequent_timeout*. The coroutine exits gracefully
+        when an end of transmission marker packet is received, in which case
+        that packet is returned.
+
+        In addition, if *end_of_transmission_marker* is empty and at least one
+        packet of a type from *type_queues* has been received, the coroutine
+        exits gracefully after the timeout expires with a return value of
+        :data:`None`.
+
+        If no matching packet is received within *initial_timeout* and
+        *response_required* is :data:`False`, the coroutine exits gracefully
+        with a return value of :data:`None`. If *response_required* is
+        :data:`True`, :class:`TimeoutError` is raised.
+
+        If *end_of_transmission_marker* is non-empty and a timeout expires,
+        :class:`TimeoutError` is raised.
+
+        In any case, all queues registered via *type_queues* will be
+        un-registered when the coroutine returns.
+        """
         eot_futures = {}
         for type_ in end_of_transmission_marker:
             logger.debug("send_and_collect_replies: registering eot marker %r",
@@ -395,6 +541,12 @@ class OpenTTDPacketProtocol(asyncio.Protocol):
                     pass
 
     def send_packet(self, pkt):
+        """
+        Send a :class:`~openttd.packet.PacketToTransmit`.
+
+        Raises :class:`ConnectionError` if the protocol is not connected to a
+        transport.
+        """
         if self._transport is None:
             raise ConnectionError("Disconnected")
         logger.debug("sending packet: %r", pkt)

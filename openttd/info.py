@@ -1,3 +1,43 @@
+"""
+``openttd.info`` -- Data tuples for game metadata
+#################################################
+
+This module merely contains several enums, classes and
+:class:`~collections.namedtuple`\ s which contain data received in queries to the
+server.
+
+Enumerations
+============
+
+.. autoclass:: NetworkVehicleType
+   :members:
+   :undoc-members:
+
+.. autoclass:: DestType
+   :members:
+   :undoc-members:
+
+.. autoclass:: NetworkAction
+   :members:
+   :undoc-members:
+
+Classes
+=======
+
+.. autoclass:: ServerInformation
+   :members:
+   :undoc-members:
+
+.. autoclass:: ClientInformation
+   :members:
+   :undoc-members:
+
+.. autoclass:: CompanyInformation
+   :members:
+   :undoc-members:
+
+"""
+
 import collections
 import logging
 
@@ -6,6 +46,11 @@ from enum import Enum
 logger = logging.getLogger()
 
 class NetworkVehicleType(Enum):
+    """
+    Enum for OpenTTD vehicle types (src:
+    ``openttd:src/network/core/network_type.h``)
+    """
+
     TRAIN = 0
     LORRY = 1
     BUS = 2
@@ -13,11 +58,21 @@ class NetworkVehicleType(Enum):
     SHIP = 4
 
 class DestType(Enum):
+    """
+    Enum for the destination of a chat message (src:
+    ``openttd:src/network/core/network_type.h``)
+    """
+
     BROADCAST = 0
     TEAM = 1
     CLIENT = 2
 
 class NetworkAction(Enum):
+    """
+    Enum for the action of a chat message (src:
+    ``openttd:src/network/core/network_type.h``)
+    """
+
     JOIN = 0
     LEAVE = 1
     SERVER_MESSAGE = 2
@@ -32,17 +87,43 @@ class NetworkAction(Enum):
 
 
 class ServerInformation:
-    def __init__(self):
-        self.name = None
-        self.openttd_revision = None
-        self.dedicated = None
-        self.map_name = None
-        self.map_seed = None
-        self.map_landscape = None
-        self.starting_year = None
-        self.map_size = None
+    """
+    Server information
+    """
+
+    #: server name (as displayed in the GUI)
+    name = None
+
+    #: openttd revision running on the server
+    openttd_revision = None
+
+    #: is a dedicated server
+    dedicated = None
+
+    #: name of the map, if any (empty string otherwise)
+    map_name = None
+
+    #: seed used to generate the map
+    map_seed = None
+
+    #: landscape of the map
+    map_landscape = None
+
+    #: year in which the game started
+    starting_year = None
+
+    #: size of the map
+    map_size = None
 
     def read_from_packet(self, pkt):
+        """
+        Read the information from a :class:`~openttd.packet.ReceivedPacket`
+        *pkt*.
+
+        Return :data:`True` if all data has been read successfully,
+        :data:`False` otherwise. This can occur e.g. if the encoding of the
+        string data is incorrect or unset.
+        """
         success = True
         try:
             self.name = pkt.unpack_string()
@@ -65,15 +146,28 @@ class ServerInformation:
         return success
 
 class ClientInformation:
-    def __init__(self):
-        self.id = None
-        self.hostname = None
-        self.name = None
-        self.lang = None
-        self.join_date = None
-        self.play_as = None
+    """
+    Client information
+    """
+
+    #: client id
+    id = None
+
+    hostname = None
+
+    #: client name (as shown in the GUI)
+    name = None
+    lang = None
+    join_date = None
+
+    #: company ID controlled by the client (255 -> none)
+    play_as = None
 
     def read_from_packet(self, pkt):
+        """
+        Read the information from a :class:`~openttd.packet.ReceivedPacket`
+        *pkt*.
+        """
         self.id = pkt.unpack_uint32()
         self.hostname = pkt.unpack_string()
         self.name = pkt.unpack_string()
@@ -92,18 +186,28 @@ class ClientInformation:
                     self.play_as))
 
 class CompanyInformation:
+    """
+    Company information
+    """
+
+    id = None
+    name = None
+    manager_name = None
+    colour = None
+    is_passworded = None
+    inaugurated_year = None
+    is_ai = None
+    quarters_of_bankruptcy = None
+    share_owners = None
+
     def __init__(self):
-        self.id = None
-        self.name = None
-        self.manager_name = None
-        self.colour = None
-        self.is_passworded = None
-        self.inaugurated_year = None
-        self.is_ai = None
-        self.quarters_of_bankruptcy = None
         self.share_owners = []
 
     def read_from_packet(self, pkt):
+        """
+        Read the information from a :class:`~openttd.packet.ReceivedPacket`
+        *pkt*.
+        """
         self.id = pkt.unpack_uint8()
         self.name = pkt.unpack_string()
         self.manager_name = pkt.unpack_string()
@@ -143,13 +247,12 @@ CompanyPerformance = collections.namedtuple(
     ])
 
 class CompanyEconomy:
-    def __init__(self):
-        self.id = None
-        self.money = None
-        self.current_loan = None
-        self.income = None
-        self.delivered_cargo = None
-        self.performance_history = []
+    id = None
+    money = None
+    current_loan = None
+    income = None
+    delivered_cargo = None
+    performance_history = None
 
     def read_from_packet(self, pkt):
         self.id = pkt.unpack_uint8()
@@ -178,8 +281,12 @@ class CompanyEconomy:
                     self.performance_history))
 
 class CompanyStats:
+    id = None
+    vehicle_counts = None
+    station_counts = None
+
     def __init__(self):
-        self.id = None
+        # override attributes with new values
         self.vehicle_counts = collections.Counter()
         self.station_counts = collections.Counter()
 
@@ -209,18 +316,17 @@ class CompanyStats:
                     self.vehicle_counts,
                     self.station_counts))
 
-class ChatMessage:
-    def __init__(self):
-        self.action = None
-        self.desttype = None
-        self.dest = None
-        self.msg = None
+_ChatMessage = collections.namedtuple(
+    "_ChatMessage",
+    ["action", "desttype", "dest", "msg"])
 
-    def read_from_packet(self, pkt):
-        self.action = NetworkAction(pkt.unpack_uint8())
-        self.desttype = DestType(pkt.unpack_uint8())
-        self.dest = pkt.unpack_uint32()
-        self.msg = pkt.unpack_string()
+class ChatMessage(_ChatMessage):
+    @classmethod
+    def read_from_packet(cls, pkt):
+        return cls(NetworkAction(pkt.unpack_uint8()),
+                   DestType(pkt.unpack_uint8()),
+                   pkt.unpack_uint32(),
+                   pkt.unpack_string())
 
     def __str__(self):
         return "{} {} {} {}".format(

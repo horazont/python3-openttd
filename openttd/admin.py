@@ -1,3 +1,28 @@
+"""
+``openttd.admin`` -- Administration interface client
+####################################################
+
+Client implementation
+=====================
+
+.. autoclass:: Client(*, loop=None, timeout=10)
+   :members: connect, connect_tcp, authenticate, disconnect, disconnect_event,
+             poll_client_info, poll_client_infos, poll_company_info,
+             poll_company_infos, poll_company_economies, poll_company_stats,
+             poll_date, rcon_command, server_info, subscribe_queue_to_push,
+             subscribe_callback_to_push, unsubscribe_queue_from_push,
+             unsubscribe_callback_from_push
+
+Enumerations specific to the administration client
+==================================================
+
+.. autoclass:: UpdateType
+   :members:
+
+.. autoclass:: UpdateFrequency
+   :members:
+
+"""
 import asyncio
 import binascii
 import logging
@@ -6,35 +31,43 @@ from enum import Enum, IntEnum
 from datetime import timedelta, datetime
 
 from . import limits, packet, info
-from .protocol import OpenTTDPacketProtocol
+from .protocol import PacketProtocol
 
 logger = logging.getLogger(__name__)
 
 class ClientState(Enum):
+    """
+    Internal state for the state machine of :class:`Client`.
+    """
     CONNECTED = 0
     AUTHENTICATED = 1
     DISCONNECTED = 2
 
 class UpdateType(Enum):
-    # Updates about the date of the game.
+    """
+    Types of updates to which the admin client can query or subscribe for (src:
+    ``openttd:src/network/core/tcp_admin.h``).
+    """
+
+    #: Updates about the date of the game.
     DATE = 0
-    # Updates about the information of clients.
+    #: Updates about the information of clients.
     CLIENT_INFO = 1
-    # Updates about the generic information of companies.
+    #: Updates about the generic information of companies.
     COMPANY_INFO = 2
-    # Updates about the economy of companies.
+    #: Updates about the economy of companies.
     COMPANY_ECONOMY = 3
-    # Updates about the statistics of companies.
+    #: Updates about the statistics of companies.
     COMPANY_STATS = 4
-    # The admin would like to have chat messages.
+    #: The admin would like to have chat messages.
     CHAT = 5
-    # The admin would like to have console messages.
+    #: The admin would like to have console messages.
     CONSOLE = 6
-    # The admin would like a list of all DoCommand names.
+    #: The admin would like a list of all DoCommand names.
     CMD_NAMES = 7
-    # The admin would like to have DoCommand information.
+    #: The admin would like to have DoCommand information.
     CMD_LOGGING = 8
-    # The admin would like to have gamescript messages.
+    #: The admin would like to have gamescript messages.
     GAMESCRIPT = 9
 
 packet_to_update_type = {
@@ -73,22 +106,92 @@ update_to_packet_type = {
 }
 
 class UpdateFrequency(IntEnum):
-    # The admin can poll this.
+    """
+    Frequency of updates (src: ``openttd:src/network/core/tcp_admin.h``). This
+    is relevant for subscribing to updates. Unsubscription is only possible if
+    :attr:`POLL` is supported (which is not the case for all update types).
+    """
+
+    #: The admin can poll this.
     POLL = 1
-    # The admin gets information about this on a daily basis.
+    #: The admin gets information about this on a daily basis.
     DAILY = 2
-    # The admin gets information about this on a weekly basis.
+    #: The admin gets information about this on a weekly basis.
     WEEKLY = 4
-    # The admin gets information about this on a monthly basis.
+    #: The admin gets information about this on a monthly basis.
     MONTHLY = 8
-    # The admin gets information about this on a quarterly basis.
+    #: The admin gets information about this on a quarterly basis.
     QUARTERLY = 16
-    # The admin gets information about this on a yearly basis.
+    #: The admin gets information about this on a yearly basis.
     ANUALLY = 32
-    # The admin gets information about this when it changes.
+    #: The admin gets information about this when it changes.
     AUTOMATIC = 64
 
 class Client:
+    """
+    Client implementation for interfacing with the administration network port.
+
+    The implementation will use the :class:`asyncio.BaseEventLoop` *loop* if
+    provided, otherwise the current event loop as returned by
+    :func:`asyncio.get_event_loop`.
+
+    The given *timeout* is used as the default timeout for any operation which
+    does not specify another timeout internally.
+
+    After construction, the client is in :attr:`~ClientState.DISCONNECTED`
+    state. To connect, one must call :meth:`connect_tcp` or passing a fully
+    initialized protocol to :meth:`connect`. The client is then in
+    :attr:`~ClientState.CONNECTED` state.
+
+    To be able to do anything meaningful (and not get disconnected within 10
+    seconds), one has to :meth:`authenticate`. If authentication is successful,
+    the client is now in the usable :attr:`~ClientState.AUTHENTICATED` state.
+
+    If the client is in any other state than :attr:`~ClientState.AUTHENTICATED`,
+    any operation besides authenticating or connecting, respectively, will fail
+    by raising :class:`ConnectionError`. If not stated otherwise, all methods
+    require the :attr:`~ClientState.AUTHENTICATED` state.
+
+    Methods for requesting data from the remote server:
+
+    +-------------------------------+------------------------------------------------------+------+
+    |Method                         |Result type                                           |Notes |
+    +===============================+======================================================+======+
+    |:meth:`poll_client_info`       |:class:`~openttd.info.ClientInformation`              |\(1)  |
+    +-------------------------------+------------------------------------------------------+------+
+    |:meth:`poll_client_infos`      |list of :class:`~openttd.info.ClientInformation`      |\(1)  |
+    +-------------------------------+------------------------------------------------------+------+
+    |:meth:`poll_company_info`      |:class:`~openttd.info.CompanyInformation`             |\(1)  |
+    +-------------------------------+------------------------------------------------------+------+
+    |:meth:`poll_company_infos`     |list of :class:`~openttd.info.CompanyInformation`     |\(1)  |
+    +-------------------------------+------------------------------------------------------+------+
+    |:meth:`poll_company_economies` |list of :class:`~openttd.info.CompanyEconomy`         |\(1)  |
+    +-------------------------------+------------------------------------------------------+------+
+    |:meth:`poll_company_stats`     |list of :class:`~openttd.info.CompanyStats`           |\(1)  |
+    +-------------------------------+------------------------------------------------------+------+
+    |:meth:`poll_date`              |:class:`int`                                          |\(1)  |
+    +-------------------------------+------------------------------------------------------+------+
+    |:meth:`rcon_command`           |list of tuples of :class:`bytes`, :class:`str`        |\(2)  |
+    +-------------------------------+------------------------------------------------------+------+
+
+    Notes:
+
+    .. _poll-note:
+
+    1. All ``poll_*``-commands share an issue. The client cannot distinguish
+       between messages sent in response to poll request and periodically sent
+       messages. To avoid similar issues with polls executed at the same time,
+       only one poll for one message type can be carried out at one point in
+       time. Locks are used to enforce this.
+
+       It is thus recommended to not mix subscription and polling for one type
+       of message.
+
+    2. The second element of the tuples is the actual message content. The
+       purpose of the first element is unknown to me.
+
+    """
+
     def __init__(self, *, loop=None, timeout=10, **kwargs):
         super().__init__(**kwargs)
         self._push_receivers = {
@@ -112,6 +215,7 @@ class Client:
         self._ping_task = None
         self._update_task = None
         self._update_task_interrupt = asyncio.Event()
+        self._poll_locks = {}
         self._reset()
 
     @asyncio.coroutine
@@ -163,6 +267,15 @@ class Client:
                 "unsupported push packet type: {}".format(packet_type)
             ) from None
 
+    def _expand_update_type_or_packet_type(self, packet_or_update_type):
+        if isinstance(packet_or_update_type, UpdateType):
+            packet_types = update_to_packet_types[packet_or_update_type]
+            update_type = packet_or_update_type
+        else:
+            packet_types = [packet_or_update_type]
+            update_type = packet_to_update_type[packet_or_update_type]
+        return update_type, packet_types
+
     @asyncio.coroutine
     def _ping_task_impl(self, interval):
         ping_pkt = self._protocol.new_packet(packet.AdminPacketType.ADMIN_PING)
@@ -200,52 +313,6 @@ class Client:
                 yield from self._fatal_error(err)
 
     @asyncio.coroutine
-    def _update_task_impl(self):
-        logger = logging.getLogger(__name__ + ".update_task_impl")
-        logger.debug("listening for push messages")
-        futures = {}
-        interrupt_future = asyncio.async(
-            self._update_task_interrupt.wait(),
-            loop=self._loop)
-        try:
-            while True:
-                for future in futures:
-                    future.cancel()
-                futures = {
-                    asyncio.async(queue.get(), loop=self._loop): (
-                        self._push_receivers[packet_type], cbs)
-                    for packet_type, (queue, cbs) in self._push_callbacks.items()
-                }
-
-                logger.debug("futures=%r", futures)
-                done, pending = yield from asyncio.wait(
-                    list(futures) + [interrupt_future],
-                    loop=self._loop,
-                    return_when=asyncio.FIRST_COMPLETED)
-
-                if interrupt_future in done:
-                    done.remove(interrupt_future)
-                    self._update_task_interrupt.clear()
-                    interrupt_future = asyncio.async(
-                        self._update_task_interrupt.wait(),
-                        loop=self._loop)
-
-                for future in done:
-                    converter, cbs = futures[future]
-                    value = converter(future.result())
-                    for cb in cbs:
-                        self._loop.call_soon(cb, value)
-                    del futures[future]
-        finally:
-            interrupt_future.cancel()
-            for future in futures:
-                future.cancel()
-                try:
-                    future.result()
-                except asyncio.CancelledError:
-                    pass
-
-    @asyncio.coroutine
     def _poll_update(self, update_type, d1=None, nresponses=1):
         poll_pkt = self._protocol.new_packet(packet.AdminPacketType.ADMIN_POLL)
         poll_pkt.pack_uint8(update_type.value)
@@ -261,25 +328,34 @@ class Client:
         response_packet_type = update_to_packet_type[update_type]
         handler_func = self._push_receivers[response_packet_type]
 
-        if nresponses == 1:
-            response = yield from self._send_andor_wait_for(
+        logger.debug("acquiring poll update lock for %r", response_packet_type)
+        try:
+            lock = self._poll_locks[response_packet_type]
+        except KeyError:
+            lock = self._poll_locks.setdefault(response_packet_type,
+                                               asyncio.Lock())
+
+        with (yield from lock):
+            logger.debug("requesting poll update for %r", response_packet_type)
+            if nresponses == 1:
+                response = yield from self._send_andor_wait_for(
+                    [
+                        poll_pkt
+                    ],
+                    [
+                        response_packet_type
+                    ])
+
+                return handler_func(response)
+
+            values, _ = yield from self._send_and_collect_replies(
                 [
                     poll_pkt
                 ],
                 [
                     response_packet_type
-                ])
-
-            return handler_func(response)
-
-        values, _ = yield from self._send_and_collect_replies(
-            [
-                poll_pkt
-            ],
-            [
-                response_packet_type
-            ],
-            initial_timeout=1)
+                ],
+                initial_timeout=1)
 
         if nresponses == "?":
             values = list(values)
@@ -499,7 +575,68 @@ class Client:
             pass
 
     @asyncio.coroutine
+    def _update_task_impl(self):
+        logger = logging.getLogger(__name__ + ".update_task_impl")
+        logger.debug("listening for push messages")
+        futures = {}
+        interrupt_future = asyncio.async(
+            self._update_task_interrupt.wait(),
+            loop=self._loop)
+        try:
+            while True:
+                for future in futures:
+                    future.cancel()
+                futures = {
+                    asyncio.async(queue.get(), loop=self._loop): (
+                        self._push_receivers[packet_type], cbs)
+                    for packet_type, (queue, cbs) in self._push_callbacks.items()
+                }
+
+                logger.debug("futures=%r", futures)
+                done, pending = yield from asyncio.wait(
+                    list(futures) + [interrupt_future],
+                    loop=self._loop,
+                    return_when=asyncio.FIRST_COMPLETED)
+
+                if interrupt_future in done:
+                    done.remove(interrupt_future)
+                    self._update_task_interrupt.clear()
+                    interrupt_future = asyncio.async(
+                        self._update_task_interrupt.wait(),
+                        loop=self._loop)
+
+                for future in done:
+                    converter, cbs = futures[future]
+                    value = converter(future.result())
+                    for cb in cbs:
+                        self._loop.call_soon(cb, value)
+                    del futures[future]
+        finally:
+            interrupt_future.cancel()
+            for future in futures:
+                future.cancel()
+                try:
+                    future.result()
+                except asyncio.CancelledError:
+                    pass
+
+    @asyncio.coroutine
     def authenticate(self, password, client_name, client_version):
+        """
+        Authenticate with the server by sending a
+        :attr:`~openttd.packet.AdminPacketType.ADMIN_JOIN` message with the
+        provided arguments. The arguments are subject to the limits set in
+        :mod:`openttd.limits`. If any of the arguments fails to encode or
+        exceeds the limits, :class:`ValueError` is raised.
+
+        If the server rejects the connection, :class:`ConnectionError` is
+        raised.
+
+        Requires the client to be in :attr:`~ClientState.CONNECTED` state. If
+        the coroutine completes successfully, the client then is in
+        :attr:`~ClientState.AUTHENTICATED` state.
+        """
+
         self._require_connected_and_unauthed()
         join_pkt = self._protocol.new_packet(packet.AdminPacketType.ADMIN_JOIN)
         join_pkt.pack_string(password, limits.NETWORK_PASSWORD_LENGTH)
@@ -573,6 +710,12 @@ class Client:
 
     @asyncio.coroutine
     def connect(self, protocol):
+        """
+        Connect the client using the given
+        :class:`openttd.protocol.PacketProtocol` instance.
+
+        Requires the client to be in :class:`~ClientState.DISCONNECTED` state.
+        """
         self._require_disconnected()
         self._protocol = protocol
         self._protocol.on_disconnect = self._on_protocol_disconnect
@@ -581,11 +724,17 @@ class Client:
         self._disconnected.clear()
 
     @asyncio.coroutine
-    def connect_tcp(self, host, port=3977, *, encoding="utf8", **kwargs):
+    def connect_tcp(self, host, port=3977, *, encoding="utf8"):
+        """
+        Automatically connect to the given *host* at the given *port* using
+        TCP. The protocol is set to use the given *encoding*.
+
+        Requires the client to be in :class:`~ClientState.DISCONNECTED` state.
+        """
         self._require_disconnected()
         _, protocol = yield from self._loop.create_connection(
-            lambda: OpenTTDPacketProtocol(loop=self._loop,
-                                          encoding=encoding),
+            lambda: PacketProtocol(loop=self._loop,
+                                   encoding=encoding),
             host=host,
             port=port)
 
@@ -593,6 +742,9 @@ class Client:
 
     @asyncio.coroutine
     def disconnect(self, exc=None):
+        """
+        Disconnect from the server, optionally with an exception *exc*.
+        """
         self._require_connected_or_authed()
         self._disconnected.set()
         yield from self._protocol.close(exc)
@@ -600,10 +752,24 @@ class Client:
 
     @property
     def disconnected_event(self):
+        """
+        An :class:`asyncio.Event` instance which is set as long as the client is
+        disconnected.
+        """
         return self._disconnected
 
     @asyncio.coroutine
     def poll_client_info(self, client_id):
+        """
+        Request :class:`~openttd.info.ClientInformation` for a specific
+        *client_id*. Return :data:`None` if the client does not exist.
+
+        .. note::
+
+           See :ref:`the note on polling functions <poll-note>` for interference
+           issues with subscription based information retrieval.
+
+        """
         self._require_authed()
         if client_id < 0 or client_id is None:
             raise ValueError("poll_client_info requires one specific id")
@@ -614,6 +780,16 @@ class Client:
 
     @asyncio.coroutine
     def poll_client_infos(self):
+        """
+        Request :class:`~openttd.info.ClientInformation` for all connected
+        clients.
+
+        .. note::
+
+           See :ref:`the note on polling functions <poll-note>` for interference
+           issues with subscription based information retrieval.
+
+        """
         self._require_authed()
         return (yield from self._poll_update(
             UpdateType.CLIENT_INFO,
@@ -622,6 +798,16 @@ class Client:
 
     @asyncio.coroutine
     def poll_company_info(self, company_id):
+        """
+        Request :class:`~openttd.info.CompanyInformation` for a specific
+        *company_id*. Return :data:`None` if the company does not exist.
+
+        .. note::
+
+           See :ref:`the note on polling functions <poll-note>` for interference
+           issues with subscription based information retrieval.
+
+        """
         self._require_authed()
         if company_id < 0 or company_id is None:
             raise ValueError("poll_company_info requires one specific id")
@@ -632,6 +818,16 @@ class Client:
 
     @asyncio.coroutine
     def poll_company_infos(self):
+        """
+        Request :class:`~openttd.info.CompanyInformation` for all existing
+        companies.
+
+        .. note::
+
+           See :ref:`the note on polling functions <poll-note>` for interference
+           issues with subscription based information retrieval.
+
+        """
         self._require_authed()
         return (yield from self._poll_update(
             UpdateType.COMPANY_INFO,
@@ -640,6 +836,21 @@ class Client:
 
     @asyncio.coroutine
     def poll_company_economies(self):
+        """
+        Request :class:`~openttd.info.CompanyEconomy` for all existing
+        companies.
+
+        .. note::
+
+           The protocol does not support querying economy information for a
+           specific company.
+
+        .. note::
+
+           See :ref:`the note on polling functions <poll-note>` for interference
+           issues with subscription based information retrieval.
+
+        """
         self._require_authed()
         return (yield from self._poll_update(
             UpdateType.COMPANY_ECONOMY,
@@ -648,6 +859,21 @@ class Client:
 
     @asyncio.coroutine
     def poll_company_stats(self):
+        """
+        Request :class:`~openttd.info.CompanyStats` for all existing
+        companies.
+
+        .. note::
+
+           The protocol does not support querying statistics information for a
+           specific company.
+
+        .. note::
+
+           See :ref:`the note on polling functions <poll-note>` for interference
+           issues with subscription based information retrieval.
+
+        """
         self._require_authed()
         return (yield from self._poll_update(
             UpdateType.COMPANY_STATS,
@@ -656,6 +882,15 @@ class Client:
 
     @asyncio.coroutine
     def poll_date(self):
+        """
+        Request the current in-game date. Return an integer.
+
+        .. note::
+
+           See :ref:`the note on polling functions <poll-note>` for interference
+           issues with subscription based information retrieval.
+
+        """
         self._require_authed()
         return (yield from self._poll_update(
             UpdateType.DATE,
@@ -663,6 +898,15 @@ class Client:
 
     @asyncio.coroutine
     def rcon_command(self, command):
+        """
+        Execute the OpenTTD console *command* remotely. Return an iterable which
+        yields tuples.
+
+        Each tuple consists of a :class:`bytes` and a :class:`str`. The string
+        is the actual console message. The iterable may be empty if the command
+        did not produce any output.
+        """
+
         self._require_authed()
         rcon_pkt = self._protocol.new_packet(packet.AdminPacketType.ADMIN_RCON)
         rcon_pkt.pack_string(command, limits.NETWORK_RCONCOMMAND_LENGTH)
@@ -689,17 +933,34 @@ class Client:
 
     @property
     def server_info(self):
+        """
+        Return the :class:`~openttd.info.ServerInformation` provided by the
+        server after authentication.
+        """
         return self._server_info
 
     def subscribe_queue_to_push(self,
                                 update_type,
                                 message_queue,
                                 frequency=UpdateFrequency.AUTOMATIC):
-        if isinstance(update_type, packet.AdminPacketType):
-            packet_types = [update_type]
-            update_type = packet_to_update_type[update_type]
-        else:
-            packet_types = update_to_packet_types[update_type]
+        """
+        Subscribe a :class:`asyncio.Queue` message_queue to an *update_type*. If
+        the update is not subscribed yet, it will be subscribed with the given
+        *frequency*. If it is already subscribed and the subscription frequency
+        differs from the given *frequency*, a :class:`ValueError` is raised.
+
+        *update_type* can either be a :class:`UpdateType`, in which case all
+        packet types associated with that packet type are subscribed. The
+        alternative is to subscribe to a specific packet type
+        :class:`~openttd.packet.AdminPacketType`. Only packet types which relate
+        to an :class:`UpdateType` can be subscribed this way.
+
+        If a matching packet is received, it is converted into the corresponding
+        :mod:`openttd.info` object and pushed to the queue.
+        """
+
+        update_type, packet_types = self._expand_update_type_or_packet_type(
+            update_type)
 
         self._prepare_subscription(update_type, packet_types,
                                    frequency=frequency)
@@ -715,11 +976,17 @@ class Client:
                                    update_type,
                                    callback,
                                    frequency=UpdateFrequency.AUTOMATIC):
-        if isinstance(update_type, packet.AdminPacketType):
-            packet_types = [update_type]
-            update_type = packet_to_update_type[update_type]
-        else:
-            packet_types = update_to_packet_types[update_type]
+        """
+        The arguments *update_type* and *frequency* have the same meaning as for
+        :meth:`subscribe_callback_to_push`.
+
+        If a matching packet is received, it is converted into the corresponding
+        :mod:`openttd.info` object and the *callback* is called with the result
+        as its only argument.
+        """
+
+        update_type, packet_types = self._expand_update_type_or_packet_type(
+            update_type)
 
         self._prepare_subscription(update_type, packet_types,
                                    frequency=frequency)
@@ -740,19 +1007,37 @@ class Client:
             cbs.add(callback)
 
     def unsubscribe_queue_from_push(self, packet_type, queue):
-        try:
-            self._protocol.packet_hooks.remove_queue(packet_type, queue)
-        except KeyError:
-            pass
+        """
+        Unsubscribe a *queue* from the given
+        :class:`~openttd.packet.AdminPacketType` or :class:`UpdateType`.
+        """
+
+        update_type, packet_types = self._expand_update_type_or_packet_type(
+            update_type)
+
+        for packet_type in packet_types:
+            try:
+                self._protocol.packet_hooks.remove_queue(packet_type, queue)
+            except KeyError:
+                pass
 
     def unsubscribe_callback_from_push(self, packet_type, callback):
-        try:
-            # avoiding extra-construction of asyncio.Queue
-            queue, cbs = self._push_callbacks[packet_type]
-        except KeyError:
-            pass
-        else:
-            cbs.remove(callback)
-            if not cbs:
-                self._protocol.packet_hooks.remove_queue(packet_type, queue)
-                del self._push_callbacks[packet_type]
+        """
+        Unsubscribe a *callback* from the given
+        :class:`~openttd.packet.AdminPacketType` or :class:`UpdateType`.
+        """
+
+        update_type, packet_types = self._expand_update_type_or_packet_type(
+            update_type)
+
+        for packet_type in packet_types:
+            try:
+                # avoiding extra-construction of asyncio.Queue
+                queue, cbs = self._push_callbacks[packet_type]
+            except KeyError:
+                pass
+            else:
+                cbs.remove(callback)
+                if not cbs:
+                    self._protocol.packet_hooks.remove_queue(packet_type, queue)
+                    del self._push_callbacks[packet_type]
