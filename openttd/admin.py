@@ -396,6 +396,7 @@ class Client:
         self._push_callbacks = {}
         self._update_dependencies = {}
         self._update_task_interrupt.clear()
+        self._rcon_lock = asyncio.Lock()
 
     @asyncio.coroutine
     def _send_and_collect_replies(self,
@@ -666,17 +667,19 @@ class Client:
         rcon_pkt = self._protocol.new_packet(packet.AdminPacketType.ADMIN_RCON)
         rcon_pkt.pack_string(command, limits.NETWORK_RCONCOMMAND_LENGTH)
 
-        logger.debug("sending rcon: %r", command)
-        results, _ = (yield from self._send_and_collect_replies(
-            [
-                rcon_pkt
-            ],
-            [
-                packet.AdminPacketType.SERVER_RCON,
-            ],
-            [
-                packet.AdminPacketType.SERVER_RCON_END
-            ]))
+        logger.debug("locking rcon lock")
+        with (yield from self._rcon_lock):
+            logger.debug("sending rcon: %r", command)
+            results, _ = (yield from self._send_and_collect_replies(
+                [
+                    rcon_pkt
+                ],
+                [
+                    packet.AdminPacketType.SERVER_RCON,
+                ],
+                [
+                    packet.AdminPacketType.SERVER_RCON_END
+                ]))
 
         def result_generator(results):
             for pkt in results:
