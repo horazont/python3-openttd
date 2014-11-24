@@ -20,11 +20,13 @@ See the examples directory for examples :).
 Documentation
 -------------
 
-Run
+.. highlight:: bash
+
+Run::
 
     make docs-html
 
-or
+or::
 
     cd docs
     make html
