@@ -8,9 +8,7 @@
 Requirements
 ------------
 
-* `Python <https://www.python.org>`_ 3.4+ (or Python 3.3 with
-  `asyncio <https://pypi.python.org/pypi/asyncio>`_ and
-  `enum34 <https://pypi.python.org/pypi/enum34>`_)
+* `Python <https://www.python.org>`_ 3.5+
 
 Basic usage
 -----------
