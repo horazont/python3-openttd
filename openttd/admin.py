@@ -765,7 +765,7 @@ class Client:
             host=host,
             port=port)
 
-        yield from self.connect(protocol, **kwargs)
+        yield from self.connect(protocol)
 
     @asyncio.coroutine
     def disconnect(self, exc=None):
