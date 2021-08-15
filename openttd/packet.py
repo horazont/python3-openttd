@@ -80,10 +80,11 @@ import io
 import logging
 import struct
 
-from enum import Enum, IntEnum
+from enum import Enum
 
 #: Maximum packet size (from ``openttd:src/network/core/config.h``)
 SEND_MTU = 1460
+
 
 class AdminPacketType(Enum):
     """
@@ -163,6 +164,7 @@ class AdminPacketType(Enum):
     SERVER_PONG = 126
     #: An invalid marker for admin packets.
     INVALID_ADMIN_PACKET = 255
+
 
 class Packer:
     """
@@ -501,6 +503,7 @@ class Unpacker:
         if encoding is None:
             raise ValueError("No encoding specified")
         return self.unpack_bytes().decode(encoding)
+
 
 class ReceivedPacket(Unpacker):
     """

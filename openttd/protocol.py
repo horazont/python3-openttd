@@ -58,6 +58,7 @@ from . import packet, packet_hooks
 
 logger = logging.getLogger(__name__)
 
+
 class PacketProtocol(asyncio.Protocol):
     """
     Create a new :class:`asyncio.Protocol` for working with streams of OpenTTD
@@ -331,7 +332,6 @@ class PacketProtocol(asyncio.Protocol):
                 bytearray(self._incomplete_size))
             self._incomplete_buffer.write(self._header_buffer)
             self._header_buffer = b""
-
 
     def eof_received(self):
         pass

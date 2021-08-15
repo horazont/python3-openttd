@@ -58,6 +58,7 @@ from .protocol import PacketProtocol
 
 logger = logging.getLogger(__name__)
 
+
 class ClientState(Enum):
     """
     Internal state for the state machine of :class:`Client`.
@@ -65,6 +66,7 @@ class ClientState(Enum):
     CONNECTED = 0
     AUTHENTICATED = 1
     DISCONNECTED = 2
+
 
 class UpdateType(Enum):
     """
@@ -128,6 +130,7 @@ update_to_packet_type = {
     UpdateType.GAMESCRIPT: packet.AdminPacketType.SERVER_GAMESCRIPT,
 }
 
+
 class UpdateFrequency(IntEnum):
     """
     Frequency of updates (src: ``openttd:src/network/core/tcp_admin.h``). This
@@ -149,6 +152,7 @@ class UpdateFrequency(IntEnum):
     ANUALLY = 32
     #: The admin gets information about this when it changes.
     AUTOMATIC = 64
+
 
 class Client:
     """
