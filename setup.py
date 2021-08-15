@@ -5,7 +5,7 @@ with open("README.rst", "r") as f:
     long_description = f.read()
 
 setup(name="python3-openttd",
-      version="0.1",
+      version="0.2.0",
       description="OpenTTD administration client library",
       long_description=long_description,
       author="Jonas Schäfer",
